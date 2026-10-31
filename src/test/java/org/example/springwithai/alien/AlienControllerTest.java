@@ -1,17 +1,11 @@
 package org.example.springwithai.alien;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
-import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
-import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
-import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import java.util.List;
 
@@ -20,10 +14,10 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.webmvc.test.autoconfigure.WebMvcTest;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
-import org.springframework.test.json.JsonCompareMode;
-import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.test.web.servlet.assertj.MockMvcTester;
 
 @WebMvcTest(AlienController.class)
 class AlienControllerTest {
@@ -33,7 +27,7 @@ class AlienControllerTest {
             """;
 
     @Autowired
-    private MockMvc mvc;
+    private MockMvcTester mvc;
 
     @MockitoBean
     private AlienService service;
@@ -43,133 +37,143 @@ class AlienControllerTest {
     }
 
     @Test
-    void listReturnsAllAliensWithoutFilters() throws Exception {
-        when(service.search(null, null)).thenReturn(List.of(zorg(), new Alien(2L, "Xylo", "Andromeda", "Blue", "Reptilian")));
+    void listReturnsAllAliensWithoutFilters() {
+        when(service.search(null, null))
+                .thenReturn(List.of(zorg(), new Alien(2L, "Xylo", "Andromeda", "Blue", "Reptilian")));
 
-        mvc.perform(get("/api/aliens"))
-                .andExpect(status().isOk())
-                .andExpect(jsonPath("$.length()").value(2))
-                .andExpect(jsonPath("$[0].name").value("Zorg"))
-                .andExpect(jsonPath("$[1].origin").value("Andromeda"));
+        assertThat(mvc.get().uri("/api/aliens"))
+                .hasStatusOk()
+                .bodyJson()
+                .isLenientlyEqualTo("""
+                        [{"name":"Zorg","origin":"Mars"}, {"name":"Xylo","origin":"Andromeda"}]
+                        """)
+                .extractingPath("$[*].name").asArray().containsExactly("Zorg", "Xylo");
     }
 
     @Test
-    void listPassesBothFiltersToService() throws Exception {
+    void listPassesBothFiltersToService() {
         when(service.search("Humanoid", "Mars")).thenReturn(List.of(zorg()));
 
-        mvc.perform(get("/api/aliens").param("type", "Humanoid").param("origin", "Mars"))
-                .andExpect(status().isOk())
-                .andExpect(jsonPath("$.length()").value(1))
-                .andExpect(jsonPath("$[0].name").value("Zorg"));
+        assertThat(mvc.get().uri("/api/aliens").param("type", "Humanoid").param("origin", "Mars"))
+                .hasStatusOk()
+                .bodyJson()
+                .extractingPath("$[*].name").asArray().containsExactly("Zorg");
     }
 
     @Test
-    void listPassesSingleFilterToService() throws Exception {
+    void listPassesSingleFilterToService() {
         when(service.search(null, "Mars")).thenReturn(List.of(zorg()));
 
-        mvc.perform(get("/api/aliens").param("origin", "Mars"))
-                .andExpect(status().isOk())
-                .andExpect(jsonPath("$[0].origin").value("Mars"));
+        assertThat(mvc.get().uri("/api/aliens").param("origin", "Mars"))
+                .hasStatusOk()
+                .bodyJson()
+                .extractingPath("$[*].origin").asArray().containsExactly("Mars");
     }
 
     @Test
-    void getReturnsAlien() throws Exception {
+    void getReturnsAlien() {
         when(service.findById(1L)).thenReturn(zorg());
 
-        mvc.perform(get("/api/aliens/1"))
-                .andExpect(status().isOk())
-                .andExpect(jsonPath("$.id").value(1))
-                .andExpect(jsonPath("$.color").value("Green"));
+        assertThat(mvc.get().uri("/api/aliens/1"))
+                .hasStatusOk()
+                .bodyJson()
+                .isLenientlyEqualTo("""
+                        {"id":1,"color":"Green"}
+                        """);
     }
 
     @Test
-    void getReturns404WhenMissing() throws Exception {
+    void getReturns404WhenMissing() {
         when(service.findById(99L)).thenThrow(new AlienNotFoundException(99L));
 
-        mvc.perform(get("/api/aliens/99"))
-                .andExpect(status().isNotFound());
+        assertThat(mvc.get().uri("/api/aliens/99"))
+                .hasStatus(HttpStatus.NOT_FOUND);
     }
 
     private static final AlienRequest ZORG_REQUEST = new AlienRequest("Zorg", "Mars", "Green", "Humanoid");
 
     @Test
-    void createReturns201WithSavedAlien() throws Exception {
+    void createReturns201WithSavedAlien() {
         when(service.create(ZORG_REQUEST)).thenReturn(zorg());
 
-        mvc.perform(post("/api/aliens").contentType(MediaType.APPLICATION_JSON).content(ZORG_JSON))
-                .andExpect(status().isCreated())
-                .andExpect(jsonPath("$.id").value(1))
-                .andExpect(jsonPath("$.name").value("Zorg"));
+        assertThat(mvc.post().uri("/api/aliens").contentType(MediaType.APPLICATION_JSON).content(ZORG_JSON))
+                .hasStatus(HttpStatus.CREATED)
+                .bodyJson()
+                .isLenientlyEqualTo("""
+                        {"id":1,"name":"Zorg"}
+                        """);
     }
 
     @Test
-    void createIgnoresClientSuppliedId() throws Exception {
+    void createIgnoresClientSuppliedId() {
         when(service.create(ZORG_REQUEST)).thenReturn(zorg());
 
-        mvc.perform(post("/api/aliens").contentType(MediaType.APPLICATION_JSON).content("""
+        assertThat(mvc.post().uri("/api/aliens").contentType(MediaType.APPLICATION_JSON).content("""
                         {"id":42,"name":"Zorg","origin":"Mars","color":"Green","type":"Humanoid"}
                         """))
-                .andExpect(status().isCreated())
-                .andExpect(jsonPath("$.id").value(1));
+                .hasStatus(HttpStatus.CREATED)
+                .bodyJson()
+                .extractingPath("$.id").isEqualTo(1);
     }
 
     @Test
-    void createStripsWhitespaceBeforeCallingService() throws Exception {
+    void createStripsWhitespaceBeforeCallingService() {
         when(service.create(ZORG_REQUEST)).thenReturn(zorg());
 
-        mvc.perform(post("/api/aliens").contentType(MediaType.APPLICATION_JSON).content("""
+        assertThat(mvc.post().uri("/api/aliens").contentType(MediaType.APPLICATION_JSON).content("""
                         {"name":" Zorg","origin":"Mars ","color":"  Green  ","type":"Humanoid\\t"}
                         """))
-                .andExpect(status().isCreated());
+                .hasStatus(HttpStatus.CREATED);
 
         verify(service).create(ZORG_REQUEST);
     }
 
     @Test
-    void createAcceptsValueAtMaxLength() throws Exception {
+    void createAcceptsValueAtMaxLength() {
         String name = "x".repeat(Alien.MAX_LENGTH);
         when(service.create(any(AlienRequest.class))).thenReturn(zorg());
 
-        mvc.perform(post("/api/aliens").contentType(MediaType.APPLICATION_JSON).content(json(name)))
-                .andExpect(status().isCreated());
+        assertThat(mvc.post().uri("/api/aliens").contentType(MediaType.APPLICATION_JSON).content(json(name)))
+                .hasStatus(HttpStatus.CREATED);
     }
 
     @Test
-    void createRejectsValueOverMaxLengthWith400() throws Exception {
+    void createRejectsValueOverMaxLengthWith400() {
         String name = "x".repeat(Alien.MAX_LENGTH + 1);
 
-        mvc.perform(post("/api/aliens").contentType(MediaType.APPLICATION_JSON).content(json(name)))
-                .andExpect(status().isBadRequest());
+        assertThat(mvc.post().uri("/api/aliens").contentType(MediaType.APPLICATION_JSON).content(json(name)))
+                .hasStatus(HttpStatus.BAD_REQUEST);
 
         verifyNoInteractions(service);
     }
 
     @Test
-    void responseContainsExactlyTheApiFields() throws Exception {
+    void responseContainsExactlyTheApiFields() {
         when(service.findById(1L)).thenReturn(zorg());
 
-        mvc.perform(get("/api/aliens/1"))
-                .andExpect(status().isOk())
-                .andExpect(content().json("""
+        assertThat(mvc.get().uri("/api/aliens/1"))
+                .hasStatusOk()
+                .bodyJson().isStrictlyEqualTo("""
                         {"id":1,"name":"Zorg","origin":"Mars","color":"Green","type":"Humanoid"}
-                        """, JsonCompareMode.STRICT));
+                        """);
     }
 
     @Test
-    void updatePassesPathIdAndRequestToService() throws Exception {
+    void updatePassesPathIdAndRequestToService() {
         when(service.update(1L, ZORG_REQUEST)).thenReturn(zorg());
 
-        mvc.perform(put("/api/aliens/1").contentType(MediaType.APPLICATION_JSON).content(ZORG_JSON))
-                .andExpect(status().isOk())
-                .andExpect(jsonPath("$.name").value("Zorg"));
+        assertThat(mvc.put().uri("/api/aliens/1").contentType(MediaType.APPLICATION_JSON).content(ZORG_JSON))
+                .hasStatusOk()
+                .bodyJson()
+                .extractingPath("$.name").isEqualTo("Zorg");
     }
 
     @Test
-    void updateRejectsValueOverMaxLengthWith400() throws Exception {
+    void updateRejectsValueOverMaxLengthWith400() {
         String name = "x".repeat(Alien.MAX_LENGTH + 1);
 
-        mvc.perform(put("/api/aliens/1").contentType(MediaType.APPLICATION_JSON).content(json(name)))
-                .andExpect(status().isBadRequest());
+        assertThat(mvc.put().uri("/api/aliens/1").contentType(MediaType.APPLICATION_JSON).content(json(name)))
+                .hasStatus(HttpStatus.BAD_REQUEST);
 
         verifyNoInteractions(service);
     }
@@ -190,36 +194,36 @@ class AlienControllerTest {
             {"name":"Zorg","origin":"Mars","color":"Green"}
             """
     })
-    void createRejectsInvalidAlienWith400(String body) throws Exception {
-        mvc.perform(post("/api/aliens").contentType(MediaType.APPLICATION_JSON).content(body))
-                .andExpect(status().isBadRequest());
+    void createRejectsInvalidAlienWith400(String body) {
+        assertThat(mvc.post().uri("/api/aliens").contentType(MediaType.APPLICATION_JSON).content(body))
+                .hasStatus(HttpStatus.BAD_REQUEST);
 
         verifyNoInteractions(service);
     }
 
     @Test
-    void updateRejectsPartialBodyWith400() throws Exception {
-        mvc.perform(put("/api/aliens/1").contentType(MediaType.APPLICATION_JSON).content("""
+    void updateRejectsPartialBodyWith400() {
+        assertThat(mvc.put().uri("/api/aliens/1").contentType(MediaType.APPLICATION_JSON).content("""
                         {"name":"Zorgon"}
                         """))
-                .andExpect(status().isBadRequest());
+                .hasStatus(HttpStatus.BAD_REQUEST);
 
         verifyNoInteractions(service);
     }
 
     @Test
-    void deleteReturns204() throws Exception {
-        mvc.perform(delete("/api/aliens/1"))
-                .andExpect(status().isNoContent());
+    void deleteReturns204() {
+        assertThat(mvc.delete().uri("/api/aliens/1"))
+                .hasStatus(HttpStatus.NO_CONTENT);
 
         verify(service).delete(1L);
     }
 
     @Test
-    void deleteReturns404WhenMissing() throws Exception {
+    void deleteReturns404WhenMissing() {
         doThrow(new AlienNotFoundException(99L)).when(service).delete(99L);
 
-        mvc.perform(delete("/api/aliens/99"))
-                .andExpect(status().isNotFound());
+        assertThat(mvc.delete().uri("/api/aliens/99"))
+                .hasStatus(HttpStatus.NOT_FOUND);
     }
 }
