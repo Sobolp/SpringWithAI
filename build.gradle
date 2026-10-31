@@ -32,6 +32,7 @@ repositories {
 
 dependencies {
     implementation libs.spring.boot.h2console
+    implementation libs.spring.boot.starter.actuator
     implementation libs.spring.boot.starter.data.jpa
     implementation libs.spring.boot.starter.validation
     implementation libs.spring.boot.starter.webmvc
@@ -52,6 +53,8 @@ dependencies {
 
 tasks.named('test') {
     useJUnitPlatform()
+    // Tests write the app's log file under build/, not into the project's logs/ directory.
+    systemProperty 'logging.file.name', 'build/test-logs/springwithai.log'
     // Load Mockito as a Java agent instead of letting it self-attach (blocked by default in future JDKs).
     // Resolved lazily, only when the test task actually runs.
     def mockitoAgent = configurations.mockitoAgent

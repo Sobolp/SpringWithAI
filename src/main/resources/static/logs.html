@@ -1,0 +1,396 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>SpringWithAI logs</title>
+    <style>
+        :root {
+            --bg: #ffffff;
+            --fg: #1f2328;
+            --muted: #59636e;
+            --bar: #f6f8fa;
+            --border: #d1d9e0;
+            --warn: #9a6700;
+            --error: #cf222e;
+            --debug: #6e7781;
+            --banner-bg: #ffebe9;
+        }
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --bg: #0d1117;
+                --fg: #e6edf3;
+                --muted: #9198a1;
+                --bar: #151b23;
+                --border: #3d444d;
+                --warn: #d29922;
+                --error: #f85149;
+                --debug: #8b949e;
+                --banner-bg: #3c1618;
+            }
+        }
+        * {
+            box-sizing: border-box;
+        }
+        html, body {
+            height: 100%;
+            margin: 0;
+        }
+        body {
+            display: flex;
+            flex-direction: column;
+            background: var(--bg);
+            color: var(--fg);
+            font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
+        }
+        header {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 8px 16px;
+            padding: 8px 16px;
+            background: var(--bar);
+            border-bottom: 1px solid var(--border);
+        }
+        h1 {
+            margin: 0;
+            font-size: 16px;
+        }
+        label {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+        }
+        button, select {
+            font: inherit;
+            padding: 2px 10px;
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            background: var(--bg);
+            color: var(--fg);
+        }
+        #status {
+            margin-left: auto;
+            color: var(--muted);
+            font-variant-numeric: tabular-nums;
+        }
+        #banner {
+            padding: 8px 16px;
+            background: var(--banner-bg);
+            color: var(--error);
+            border-bottom: 1px solid var(--border);
+        }
+        #log {
+            flex: 1;
+            overflow: auto;
+            margin: 0;
+            padding: 8px 16px;
+            font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+            white-space: pre-wrap;
+            overflow-wrap: anywhere;
+        }
+        .lvl-ERROR {
+            color: var(--error);
+        }
+        .lvl-WARN {
+            color: var(--warn);
+        }
+        .lvl-DEBUG, .lvl-TRACE {
+            color: var(--debug);
+        }
+        /* Level filter: the container's data-min hides every lower level. */
+        #log[data-min="DEBUG"] .lvl-TRACE,
+        #log[data-min="INFO"] :is(.lvl-TRACE, .lvl-DEBUG),
+        #log[data-min="WARN"] :is(.lvl-TRACE, .lvl-DEBUG, .lvl-INFO),
+        #log[data-min="ERROR"] :is(.lvl-TRACE, .lvl-DEBUG, .lvl-INFO, .lvl-WARN) {
+            display: none;
+        }
+    </style>
+</head>
+<body>
+<header>
+    <h1>SpringWithAI logs</h1>
+    <button id="pause" type="button">Pause</button>
+    <label>Level
+        <select id="level">
+            <option value="TRACE">All</option>
+            <option value="DEBUG">DEBUG and above</option>
+            <option value="INFO">INFO and above</option>
+            <option value="WARN">WARN and above</option>
+            <option value="ERROR">ERROR only</option>
+        </select>
+    </label>
+    <label><input id="follow" type="checkbox" checked> Auto-scroll</label>
+    <span id="status">Loading…</span>
+</header>
+<div id="banner" role="alert" hidden></div>
+<pre id="log" data-min="TRACE"></pre>
+<script>
+    'use strict';
+
+    /**
+     * Source of new log text for this page. The display code below talks only to a LogStream, so a push
+     * implementation (an SseLogStream on GET /logs/stream) can later replace polling without touching it.
+     *
+     * @typedef {Object} LogStream
+     * @property {(h: LogHandlers) => Promise<void>} start  first call loads the tail; later calls resume
+     * @property {() => void} stop                           pause; no requests while stopped
+     *
+     * @typedef {Object} LogHandlers
+     * @property {(text: string) => void} onText             new text to append
+     * @property {(text: string) => void} onReset            replace everything (first load, file rolled)
+     * @property {(err: Error) => void} onError              show a banner; the stream keeps trying
+     * @property {(size: number) => void} onStatus           a request succeeded; size = file size in bytes
+     */
+
+    /**
+     * Tails /actuator/logfile with HTTP Range requests, asking only for bytes it has not seen yet.
+     *
+     * Each poll also re-reads the last OVERLAP bytes already shown and compares them. When the file rolls, the new
+     * file holds other bytes there (log lines start with a timestamp), so the stream reloads the tail. A smaller
+     * size alone would miss a roll when the new file has already grown past the old offset.
+     */
+    class RangePollingLogStream {
+        static OVERLAP = 64;
+
+        constructor({ url = 'actuator/logfile', intervalMs = 2000, initialBytes = 65536 } = {}) {
+            Object.assign(this, { url, intervalMs, initialBytes });
+            this.offset = 0;                  // bytes of the file already shown
+            this.tail = new Uint8Array(0);    // the last OVERLAP of those bytes
+            this.running = false;
+            this.loaded = false;
+            this.busy = false;                // a request is in flight
+        }
+
+        /** Loads (first call) or polls at once, then every intervalMs. */
+        start(h) {
+            this.h = h;
+            this.running = true;
+            return this.tick();
+        }
+
+        stop() {
+            this.running = false;
+            clearTimeout(this.timer);
+        }
+
+        // At most one request at a time: offset and tail are only valid for one reader. A tick that finds a request
+        // in flight (e.g. Resume right after Pause) does nothing; the request in flight schedules the next tick.
+        async tick() {
+            if (this.busy) {
+                return;
+            }
+            this.busy = true;
+            try {
+                await (this.loaded ? this.poll() : this.reload());
+            } finally {
+                this.busy = false;
+                this.loop();
+            }
+        }
+
+        // setTimeout, not setInterval: the next poll is scheduled only after this one finished.
+        loop() {
+            clearTimeout(this.timer);
+            if (this.running) {
+                this.timer = setTimeout(() => this.tick(), this.intervalMs);
+            }
+        }
+
+        /** Loads the last initialBytes of the file and replaces everything shown. */
+        async reload() {
+            try {
+                this.decoder = new TextDecoder('utf-8');
+                const res = await this.fetchRange(`bytes=-${this.initialBytes}`);
+                if (res.status === 416) {               // empty file
+                    this.offset = 0;
+                    this.tail = new Uint8Array(0);
+                    this.loaded = true;
+                    this.h.onReset('');
+                    this.h.onStatus(0);
+                    return;
+                }
+                if (!res.ok) {
+                    throw new Error(describe(res));
+                }
+                const bytes = new Uint8Array(await res.arrayBuffer());
+                const text = this.decoder.decode(bytes, { stream: true });
+                this.offset = totalSize(res);
+                this.tail = bytes.slice(-RangePollingLogStream.OVERLAP);
+                this.loaded = true;
+                // A tail that starts mid-file starts mid-line: drop that partial first line.
+                this.h.onReset(rangeStart(res) > 0 ? text.slice(text.indexOf('\n') + 1) : text);
+                this.h.onStatus(this.offset);
+            } catch (e) {
+                this.h.onError(e);
+            }
+        }
+
+        /** Appends whatever was written since the last request. */
+        async poll() {
+            if (!this.loaded) {
+                return this.reload();
+            }
+            try {
+                // Re-read the known tail: it detects a roll, and keeps an idle poll a 206 rather than a 416.
+                const from = this.offset - this.tail.length;
+                const res = await this.fetchRange(`bytes=${from}-`);
+                if (res.status === 416 || (res.status === 206 && totalSize(res) < this.offset)) {
+                    return this.reload();               // the file is shorter than before: it rolled
+                }
+                if (res.status !== 206) {
+                    throw new Error(describe(res));
+                }
+                const received = new Uint8Array(await res.arrayBuffer());
+                if (!sameBytes(received.subarray(0, this.tail.length), this.tail)) {
+                    return this.reload();               // other bytes where ours were: it rolled and regrew
+                }
+                const bytes = received.subarray(this.tail.length);
+                this.offset = totalSize(res);
+                if (bytes.length > 0) {
+                    const known = new Uint8Array(this.tail.length + bytes.length);
+                    known.set(this.tail);
+                    known.set(bytes, this.tail.length);
+                    this.tail = known.slice(-RangePollingLogStream.OVERLAP);
+                }
+                const text = this.decoder.decode(bytes, { stream: true });  // keeps split UTF-8 characters whole
+                if (text) {
+                    this.h.onText(text);
+                }
+                this.h.onStatus(this.offset);
+            } catch (e) {
+                this.h.onError(e);
+            }
+        }
+
+        fetchRange(range) {
+            return fetch(this.url, { headers: { Range: range }, cache: 'no-store' });
+        }
+    }
+
+    // "Content-Range: bytes 100-199/200" -> 200
+    function totalSize(res) {
+        const range = res.headers.get('Content-Range');
+        return range ? Number(range.split('/')[1]) : Number(res.headers.get('Content-Length'));
+    }
+
+    // "Content-Range: bytes 100-199/200" -> 100
+    function rangeStart(res) {
+        const range = res.headers.get('Content-Range');
+        return range ? Number(range.replace(/^bytes /, '').split('-')[0]) : 0;
+    }
+
+    function sameBytes(a, b) {
+        return a.length === b.length && a.every((value, i) => value === b[i]);
+    }
+
+    function describe(res) {
+        const reasons = {
+            403: 'access denied (log access is limited to localhost)',
+            404: `nothing at ${new URL(res.url).pathname}. Either no log file is configured `
+                + '(logging.file.name), or management.endpoints.web.base-path is not /actuator: this page '
+                + 'expects the default base path',
+        };
+        return `HTTP ${res.status}` + (reasons[res.status] ? `: ${reasons[res.status]}` : '');
+    }
+
+    // The one place that picks the implementation.
+    function createLogStream() {
+        return new RangePollingLogStream({ intervalMs: 2000 });
+        // later: return new SseLogStream({ url: 'logs/stream' });
+    }
+
+    // ---- Display: talks only to the LogStream handlers. ----
+
+    const MAX_LINES = 10000;
+    const LEVEL = /^\S+\s+(TRACE|DEBUG|INFO|WARN|ERROR)\s/;
+
+    const logEl = document.getElementById('log');
+    const statusEl = document.getElementById('status');
+    const bannerEl = document.getElementById('banner');
+    const pauseEl = document.getElementById('pause');
+    const levelEl = document.getElementById('level');
+    const followEl = document.getElementById('follow');
+
+    let partial = '';                   // text after the last newline, shown once its line is complete
+    let currentLevel = 'INFO';          // stack trace lines have no level; they take the level of their entry
+
+    function addLines(text) {
+        const lines = (partial + text).split('\n');
+        partial = lines.pop();
+        if (lines.length === 0) {
+            return;
+        }
+        const fragment = document.createDocumentFragment();
+        for (const line of lines) {
+            const match = LEVEL.exec(line);
+            if (match) {
+                currentLevel = match[1];
+            }
+            const div = document.createElement('div');
+            div.className = 'lvl-' + currentLevel;
+            div.textContent = line;
+            fragment.append(div);
+        }
+        logEl.append(fragment);
+        while (logEl.childElementCount > MAX_LINES) {
+            logEl.firstElementChild.remove();
+        }
+        if (followEl.checked) {
+            logEl.scrollTop = logEl.scrollHeight;
+        }
+    }
+
+    function formatSize(bytes) {
+        if (bytes < 1024) {
+            return `${bytes} B`;
+        }
+        return bytes < 1024 * 1024 ? `${(bytes / 1024).toFixed(1)} KB` : `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+    }
+
+    const handlers = {
+        onText(text) {
+            addLines(text);
+        },
+        onReset(text) {
+            logEl.replaceChildren();
+            partial = '';
+            currentLevel = 'INFO';
+            addLines(text);
+        },
+        onError(err) {
+            bannerEl.textContent = `Cannot read the log: ${err.message}. Retrying every 2 seconds.`;
+            bannerEl.hidden = false;
+            statusEl.textContent = 'Error';
+        },
+        onStatus(size) {
+            bannerEl.hidden = true;
+            statusEl.textContent = `Live · ${formatSize(size)} · updated ${new Date().toLocaleTimeString()}`;
+        },
+    };
+
+    const stream = createLogStream();
+    let paused = false;
+
+    pauseEl.addEventListener('click', () => {
+        paused = !paused;
+        pauseEl.textContent = paused ? 'Resume' : 'Pause';
+        if (paused) {
+            stream.stop();
+            statusEl.textContent = 'Paused';
+        } else {
+            stream.start(handlers);
+        }
+    });
+
+    levelEl.addEventListener('change', () => {
+        logEl.dataset.min = levelEl.value;
+        if (followEl.checked) {
+            logEl.scrollTop = logEl.scrollHeight;
+        }
+    });
+
+    stream.start(handlers);
+</script>
+</body>
+</html>
