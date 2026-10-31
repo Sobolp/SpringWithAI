@@ -130,11 +130,10 @@ class AlienServiceTest {
     class Commands {
 
         @Test
-        void createIgnoresClientSuppliedIdAndSaves() {
-            Alien input = new Alien(42L, "Blib", "Europa", "Purple", "Amphibian");
+        void createSavesNewEntityFromRequest() {
             when(repository.save(any(Alien.class))).thenAnswer(inv -> inv.getArgument(0));
 
-            Alien saved = service.create(input);
+            Alien saved = service.create(new AlienRequest("Blib", "Europa", "Purple", "Amphibian"));
 
             assertThat(saved)
                     .extracting(Alien::getId, Alien::getName, Alien::getOrigin, Alien::getColor, Alien::getType)
@@ -145,7 +144,7 @@ class AlienServiceTest {
         void updateCopiesAllFieldsAndKeepsId() {
             when(repository.findById(1L)).thenReturn(Optional.of(zorg()));
 
-            Alien updated = service.update(1L, new Alien(7L, "Zorgon", "Venus", "Teal", "Cyborg"));
+            Alien updated = service.update(1L, new AlienRequest("Zorgon", "Venus", "Teal", "Cyborg"));
 
             assertThat(updated)
                     .extracting(Alien::getId, Alien::getName, Alien::getOrigin, Alien::getColor, Alien::getType)
@@ -156,7 +155,7 @@ class AlienServiceTest {
         void updateThrowsWhenMissing() {
             when(repository.findById(99L)).thenReturn(Optional.empty());
 
-            assertThatThrownBy(() -> service.update(99L, zorg()))
+            assertThatThrownBy(() -> service.update(99L, new AlienRequest("Zorg", "Mars", "Green", "Humanoid")))
                     .isInstanceOf(AlienNotFoundException.class);
         }
 

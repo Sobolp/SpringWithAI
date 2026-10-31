@@ -42,22 +42,18 @@ public class AlienService {
     }
 
     @Transactional
-    public Alien create(Alien alien) {
-        alien.setId(null);
-        return repository.save(alien);
+    public Alien create(AlienRequest request) {
+        return repository.save(request.toEntity());
     }
 
-    /**
-     * Full replacement (PUT semantics): every field is overwritten, so callers must send a complete,
-     * validated alien. The controller enforces this with {@code @Valid}.
-     */
+    /** Full replacement (PUT semantics): every field is overwritten with the request's values. */
     @Transactional
-    public Alien update(Long id, Alien changes) {
+    public Alien update(Long id, AlienRequest request) {
         Alien alien = findById(id);
-        alien.setName(changes.getName());
-        alien.setOrigin(changes.getOrigin());
-        alien.setColor(changes.getColor());
-        alien.setType(changes.getType());
+        alien.setName(request.name());
+        alien.setOrigin(request.origin());
+        alien.setColor(request.color());
+        alien.setType(request.type());
         return alien;
     }
 
